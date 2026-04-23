@@ -3,6 +3,7 @@ from __future__ import annotations
 import click
 
 from csak import __version__
+from csak.cli.org import org as org_group
 
 
 @click.group()
@@ -35,6 +36,9 @@ def main(ctx: click.Context, db: str, artifacts_dir: str, reports_dir: str) -> N
     ctx.obj["db_path"] = db
     ctx.obj["artifacts_dir"] = artifacts_dir
     ctx.obj["reports_dir"] = reports_dir
+
+
+main.add_command(org_group)
 
 
 if __name__ == "__main__":
