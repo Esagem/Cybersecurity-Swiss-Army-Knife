@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+env/
+.env
+
+# Runtime state (user data)
+csak.db
+csak.db-journal
+csak.db-wal
+csak.db-shm
+artifacts/
+reports/
+
+# Editor
+.vscode/
+.idea/
+*.swp
