@@ -110,4 +110,9 @@ def map_severity(source_tool: str, raw: str | int | None) -> str | None:
         return NUCLEI_SEVERITY_MAP.get(s)
     if source_tool == "nessus":
         return NESSUS_SEVERITY_MAP.get(s)
+    # Tools without a self-reported severity scale (zeek, osquery,
+    # subfinder, httpx) apply their own ruleset in the parser and hand
+    # us the CSAK severity string directly. We accept it if it's valid.
+    if s in {"critical", "high", "medium", "low", "info"}:
+        return s
     return None

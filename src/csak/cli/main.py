@@ -3,6 +3,7 @@ from __future__ import annotations
 import click
 
 from csak import __version__
+from csak.cli.ingest import ingest as ingest_cmd
 from csak.cli.org import org as org_group
 
 
@@ -39,6 +40,7 @@ def main(ctx: click.Context, db: str, artifacts_dir: str, reports_dir: str) -> N
 
 
 main.add_command(org_group)
+main.add_command(ingest_cmd)
 
 
 if __name__ == "__main__":
