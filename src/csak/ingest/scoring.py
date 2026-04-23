@@ -1,11 +1,11 @@
 """Deterministic scoring at ingest time.
 
-`priority = severity_weight * confidence_weight * target_weight * probability_real`
+`priority = severity_weight * confidence_weight * target_weight`
 
 Severity comes from the tool (mapped via a per-tool table); confidence
 either comes from the tool or defaults to a tool-specific constant that
-reflects how much we trust that tool's raw output; probability_real is
-analyst-only and defaults to 1.0. Target weight lives on the Target row.
+reflects how much we trust that tool's raw output. Target weight lives
+on the Target row and is analyst-editable.
 
 These tables are intentionally small and explicit. They can be moved
 to on-disk config later; slice 1 keeps them inline so the score path
@@ -88,11 +88,10 @@ def compute_priority(
     severity: str | None,
     confidence: str,
     target_weight: float,
-    probability_real: float,
 ) -> Score:
     sw = SEVERITY_WEIGHTS.get(severity, SEVERITY_WEIGHTS[None])
     cw = CONFIDENCE_WEIGHTS.get(confidence, CONFIDENCE_WEIGHTS["medium"])
-    priority = sw * cw * target_weight * probability_real
+    priority = sw * cw * target_weight
     return Score(
         severity=severity,
         confidence=confidence,

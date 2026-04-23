@@ -86,7 +86,6 @@ class Finding:
     title: str
     severity: str | None
     confidence: str
-    probability_real: float
     priority: float
     severity_weight: float
     confidence_weight: float

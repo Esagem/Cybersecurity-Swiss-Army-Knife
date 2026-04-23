@@ -63,7 +63,6 @@ def update(ctx: click.Context, target_id: str, weight: float | None) -> None:
                 severity=f.severity,
                 confidence=f.confidence,
                 target_weight=weight,
-                probability_real=f.probability_real,
             )
             repo.update_finding_priority(conn, f.id, priority=score.priority)
         conn.commit()

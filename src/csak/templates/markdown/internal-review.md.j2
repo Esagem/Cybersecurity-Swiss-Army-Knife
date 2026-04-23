@@ -49,7 +49,7 @@ Severity breakdown:
 - **Target:** `{{ v.target.name }}`
 - **Tool:** {{ v.finding.source_tool }}
 - **Priority:** {{ "%.3f" | format(v.finding.priority) }}
-  ({{ "%.2f" | format(v.finding.severity_weight) }} × {{ "%.2f" | format(v.finding.confidence_weight) }} × {{ "%.2f" | format(v.target.target_weight) }} × {{ "%.2f" | format(v.finding.probability_real) }})
+  ({{ "%.2f" | format(v.finding.severity_weight) }} × {{ "%.2f" | format(v.finding.confidence_weight) }} × {{ "%.2f" | format(v.target.target_weight) }})
 - **Confidence:** {{ v.finding.confidence }}
 - **Status:** {{ v.finding.status }}
 - **First seen:** {{ v.finding.first_seen | isodatetime }}

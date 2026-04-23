@@ -27,7 +27,8 @@ from csak.storage.models import Finding, Org, Scan, Target
 
 
 # Bump whenever the JSON schema changes shape in a breaking way.
-JSON_SCHEMA_VERSION = 1
+# v2: removed `probability_real` from findings and from priority_components.
+JSON_SCHEMA_VERSION = 2
 
 
 REPORT_KINDS = ("internal-review", "fit-bundle")

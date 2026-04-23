@@ -143,7 +143,7 @@ def _write_finding_card(doc: Document, v: FindingView) -> None:
     priority_expr = (
         f"{f.priority:.3f}  "
         f"({f.severity_weight:.2f} × {f.confidence_weight:.2f} × "
-        f"{v.target.target_weight:.2f} × {f.probability_real:.2f})"
+        f"{v.target.target_weight:.2f})"
     )
     labelled(doc, "Priority", priority_expr)
     labelled(doc, "Confidence", f.confidence)

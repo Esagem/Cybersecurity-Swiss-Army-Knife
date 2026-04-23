@@ -89,13 +89,11 @@ def _finding(v: FindingView) -> dict:
         },
         "severity": f.severity,
         "confidence": f.confidence,
-        "probability_real": f.probability_real,
         "priority": f.priority,
         "priority_components": {
             "severity_weight": f.severity_weight,
             "confidence_weight": f.confidence_weight,
             "target_weight": v.target.target_weight,
-            "probability_real": f.probability_real,
         },
         "status": f.status,
         "tags": list(f.tags),

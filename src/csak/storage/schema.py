@@ -85,7 +85,6 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         title               TEXT NOT NULL,
         severity            TEXT,
         confidence          TEXT NOT NULL,
-        probability_real    REAL NOT NULL DEFAULT 1.0,
         priority            REAL NOT NULL,
         severity_weight     REAL NOT NULL,
         confidence_weight   REAL NOT NULL,

@@ -305,7 +305,7 @@ def test_report_generate_with_unknown_format_errors(cli_env) -> None:
     assert "pdf" in r.output
 
 
-def test_findings_update_rejects_probability_out_of_range(cli_env) -> None:
+def test_findings_update_without_any_flags_errors(cli_env) -> None:
     invoke, tmp_path, db_path, _, _ = cli_env
     invoke(["org", "create", "acme"])
     p = tmp_path / "n.jsonl"
@@ -316,9 +316,9 @@ def test_findings_update_rejects_probability_out_of_range(cli_env) -> None:
     fid = conn.execute("SELECT id FROM findings").fetchone()[0]
     conn.close()
 
-    r = invoke(["findings", "update", fid, "--probability-real", "1.5"])
+    r = invoke(["findings", "update", fid])
     assert r.exit_code != 0
-    assert "probability-real" in r.output
+    assert "nothing to update" in r.output
 
 
 def test_findings_show_returns_detail(cli_env) -> None:

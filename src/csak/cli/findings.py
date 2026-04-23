@@ -72,7 +72,6 @@ def show(ctx: click.Context, finding_id: str) -> None:
         click.echo(f"target:           {target.name if target else f.target_id}")
         click.echo(f"severity:         {f.severity or '— (needs analyst review)'}")
         click.echo(f"confidence:       {f.confidence}")
-        click.echo(f"probability_real: {f.probability_real}")
         click.echo(f"priority:         {f.priority:.4f}")
         click.echo(f"  severity_w:     {f.severity_weight}")
         click.echo(f"  confidence_w:   {f.confidence_weight}")
@@ -90,7 +89,6 @@ def show(ctx: click.Context, finding_id: str) -> None:
 
 @findings.command("update")
 @click.argument("finding_id")
-@click.option("--probability-real", type=float, help="Analyst override 0.0–1.0.")
 @click.option(
     "--status",
     type=click.Choice(
@@ -103,7 +101,6 @@ def show(ctx: click.Context, finding_id: str) -> None:
 def update(
     ctx: click.Context,
     finding_id: str,
-    probability_real: float | None,
     status: str | None,
     tags: tuple[str, ...],
 ) -> None:
@@ -114,10 +111,9 @@ def update(
         if f is None:
             raise click.ClickException(f"finding {finding_id} not found")
 
-        if probability_real is not None:
-            if not 0.0 <= probability_real <= 1.0:
-                raise click.ClickException("--probability-real must be in [0.0, 1.0]")
-            f.probability_real = probability_real
+        if status is None and not tags:
+            raise click.ClickException("nothing to update (pass --status or --tag)")
+
         if status is not None:
             f.status = status
         if tags:
@@ -130,13 +126,11 @@ def update(
             severity=f.severity,
             confidence=f.confidence,
             target_weight=target_weight,
-            probability_real=f.probability_real,
         )
         repo.update_finding_priority(
             conn,
             f.id,
             priority=score.priority,
-            probability_real=f.probability_real,
             status=f.status,
             tags=f.tags,
         )

@@ -364,10 +364,10 @@ def insert_finding(conn: sqlite3.Connection, finding: Finding) -> Finding:
         """
         INSERT INTO findings(
             id, org_id, target_id, source_tool, source_artifact_id, dedup_key,
-            title, severity, confidence, probability_real, priority,
+            title, severity, confidence, priority,
             severity_weight, confidence_weight, raw_json, normalized_json,
             first_seen, last_seen, status, tags_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             finding.id,
@@ -379,7 +379,6 @@ def insert_finding(conn: sqlite3.Connection, finding: Finding) -> Finding:
             finding.title,
             finding.severity,
             finding.confidence,
-            finding.probability_real,
             finding.priority,
             finding.severity_weight,
             finding.confidence_weight,
@@ -429,20 +428,16 @@ def update_finding_priority(
     finding_id: str,
     *,
     priority: float,
-    probability_real: float | None = None,
     status: str | None = None,
     tags: list[str] | None = None,
 ) -> None:
     """Apply an analyst mutation and its recomputed priority.
 
-    `probability_real`/`status`/`tags` are optional so the caller can
-    update just the priority (e.g. after a target weight changes).
+    `status`/`tags` are optional so the caller can update just the
+    priority (e.g. after a target weight changes).
     """
     fields: list[str] = ["priority = ?"]
     params: list = [priority]
-    if probability_real is not None:
-        fields.append("probability_real = ?")
-        params.append(probability_real)
     if status is not None:
         fields.append("status = ?")
         params.append(status)
@@ -497,7 +492,6 @@ def _row_to_finding(row: sqlite3.Row) -> Finding:
         title=row["title"],
         severity=row["severity"],
         confidence=row["confidence"],
-        probability_real=row["probability_real"],
         priority=row["priority"],
         severity_weight=row["severity_weight"],
         confidence_weight=row["confidence_weight"],

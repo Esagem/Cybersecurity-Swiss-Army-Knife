@@ -60,23 +60,24 @@ def test_end_to_end_ingest_list_update_flow(
     import sqlite3
 
     conn = sqlite3.connect(db_path)
-    row = conn.execute("SELECT id, priority FROM findings").fetchone()
-    finding_id, old_priority = row
+    row = conn.execute("SELECT id, status FROM findings").fetchone()
+    finding_id, old_status = row
     conn.close()
 
-    # Update: lower probability_real, expect priority to drop.
+    # Update: mark as accepted-risk.
     r = _cli(
         db_path, artifacts_path,
-        ["findings", "update", finding_id, "--probability-real", "0.1"],
+        ["findings", "update", finding_id, "--status", "accepted-risk"],
     )
     assert r.exit_code == 0, r.output
 
     conn = sqlite3.connect(db_path)
-    new_priority = conn.execute(
-        "SELECT priority FROM findings WHERE id = ?", (finding_id,)
+    new_status = conn.execute(
+        "SELECT status FROM findings WHERE id = ?", (finding_id,)
     ).fetchone()[0]
     conn.close()
-    assert new_priority < old_priority
+    assert old_status == "active"
+    assert new_status == "accepted-risk"
 
 
 def test_target_weight_update_recomputes_finding_priorities(

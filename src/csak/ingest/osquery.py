@@ -24,7 +24,7 @@ from csak.ingest.pipeline import register_parser
 
 
 # Query-name → CSAK severity. Conservative defaults; the analyst can
-# override individual findings with `probability_real`.
+# override individual findings via status or tags.
 QUERY_SEVERITY: dict[str, str] = {
     "listening_ports": "info",
     "processes": "info",

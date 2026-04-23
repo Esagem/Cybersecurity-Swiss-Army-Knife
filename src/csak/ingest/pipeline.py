@@ -213,7 +213,6 @@ def _ingest(
             severity=severity,
             confidence=confidence,
             target_weight=target.target_weight,
-            probability_real=1.0,
         )
 
         finding = Finding(
@@ -226,7 +225,6 @@ def _ingest(
             title=pf.title,
             severity=severity,
             confidence=confidence,
-            probability_real=1.0,
             priority=score.priority,
             severity_weight=score.severity_weight,
             confidence_weight=score.confidence_weight,

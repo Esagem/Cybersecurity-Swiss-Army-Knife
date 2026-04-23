@@ -108,7 +108,6 @@ def test_finding_dedup_key_unique(db) -> None:
         title="SSL DNS names exposed",
         severity="info",
         confidence="high",
-        probability_real=1.0,
         priority=0.1,
         severity_weight=0.1,
         confidence_weight=1.0,

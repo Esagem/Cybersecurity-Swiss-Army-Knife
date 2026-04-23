@@ -13,47 +13,34 @@ def test_priority_is_product_of_all_axes() -> None:
         severity="high",
         confidence="medium",
         target_weight=1.5,
-        probability_real=0.8,
     )
-    expected = SEVERITY_WEIGHTS["high"] * CONFIDENCE_WEIGHTS["medium"] * 1.5 * 0.8
+    expected = SEVERITY_WEIGHTS["high"] * CONFIDENCE_WEIGHTS["medium"] * 1.5
     assert s.priority == pytest.approx(expected)
     assert s.severity_weight == SEVERITY_WEIGHTS["high"]
     assert s.confidence_weight == CONFIDENCE_WEIGHTS["medium"]
 
 
 def test_unknown_severity_surfaces_between_info_and_medium() -> None:
-    s = compute_priority(
-        severity=None,
-        confidence="high",
-        target_weight=1.0,
-        probability_real=1.0,
-    )
+    s = compute_priority(severity=None, confidence="high", target_weight=1.0)
     # Null severity sits above info but below medium so "needs review"
     # items are visible in a priority-sorted list.
     info_score = compute_priority(
-        severity="info",
-        confidence="high",
-        target_weight=1.0,
-        probability_real=1.0,
+        severity="info", confidence="high", target_weight=1.0
     ).priority
     medium_score = compute_priority(
-        severity="medium",
-        confidence="high",
-        target_weight=1.0,
-        probability_real=1.0,
+        severity="medium", confidence="high", target_weight=1.0
     ).priority
     assert info_score < s.priority < medium_score
 
 
-def test_probability_real_below_one_lowers_priority() -> None:
-    high = compute_priority(
-        severity="high", confidence="high", target_weight=1.0, probability_real=1.0
+def test_target_weight_scales_priority_linearly() -> None:
+    base = compute_priority(
+        severity="high", confidence="high", target_weight=1.0
     ).priority
-    low = compute_priority(
-        severity="high", confidence="high", target_weight=1.0, probability_real=0.2
+    doubled = compute_priority(
+        severity="high", confidence="high", target_weight=2.0
     ).priority
-    assert low < high
-    assert low == pytest.approx(high * 0.2)
+    assert doubled == pytest.approx(base * 2.0)
 
 
 def test_map_severity_nuclei_and_nessus() -> None:

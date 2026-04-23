@@ -49,8 +49,10 @@ def test_json_has_schema_version_and_core_sections(
     first = doc["findings"][0]
     assert first["source_tool"] == "nuclei"
     assert set(first["priority_components"]) == {
-        "severity_weight", "confidence_weight", "target_weight", "probability_real"
+        "severity_weight", "confidence_weight", "target_weight"
     }
+    # probability_real was removed in schema v2; it must not appear on the finding.
+    assert "probability_real" not in first
     # Each finding cites the scans it was seen in.
     assert "seen_in_scans" in first
     assert first["seen_in_scans"][0]["source_tool"] == "nuclei"
