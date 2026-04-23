@@ -1,0 +1,39 @@
+# Fix-it Ticket Bundle — {{ org.name }}
+
+**Period:** {{ period.label }}  ({{ period.start | isodate }} → {{ period.end | isodate }})
+**Generated:** {{ generated_at | isodatetime }}
+
+This bundle contains **{{ tickets | length }} ticket(s)**, one per distinct
+issue identified during the window. Findings affecting multiple assets
+are collapsed into a single ticket with all assets listed.
+
+## Tickets
+
+{% if not tickets -%}
+*(no actionable findings in this period)*
+{% else -%}
+{% for t in tickets -%}
+### {{ t.ticket_id }} — {{ t.title }}
+
+**Severity:** {{ t.severity or "needs analyst review" }}
+**Affected assets:**
+{% for asset in t.affected_assets -%}
+- `{{ asset }}`
+{% endfor %}
+
+**Impact**
+
+{{ t.impact }}
+
+**Remediation**
+
+{{ t.remediation }}
+
+**Validation**
+
+{{ t.validation }}
+
+---
+
+{% endfor -%}
+{% endif %}

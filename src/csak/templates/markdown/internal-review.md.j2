@@ -1,0 +1,71 @@
+# Internal Review — {{ org.name }}
+
+**Period:** {{ period.label }}  ({{ period.start | isodate }} → {{ period.end | isodate }})
+**Generated:** {{ generated_at | isodatetime }}
+**CSAK:** {{ csak_version }}
+
+## Summary
+
+- Findings in window: **{{ findings | length }}**
+- Targets touched: **{{ targets_by_name | length }}**
+- Contributing scans: **{{ methodology | length }}**
+
+Severity breakdown:
+
+| Severity | Count |
+|---|---|
+{% for sev, items in findings_by_severity.items() -%}
+{% if items %}| {{ sev }} | {{ items | length }} |
+{% endif -%}
+{% endfor %}
+
+## Methodology
+
+{% if methodology -%}
+| Tool | Label | Started | Completed | Timestamp source | Findings in window |
+|---|---|---|---|---|---|
+{% for m in methodology -%}
+| {{ m.scan.source_tool }} | {{ m.scan.label }} | {{ m.scan.scan_started_at | isodatetime }} | {{ m.scan.scan_completed_at | isodatetime }} | {{ m.scan.timestamp_source }} | {{ m.finding_count }} |
+{% endfor %}
+{% for m in methodology %}{% if m.timestamp_disclaimer %}
+> **Note on `{{ m.scan.label }}`:** {{ m.timestamp_disclaimer }}
+{% endif %}{% endfor %}
+{% else -%}
+*(no scans contributed to this period)*
+{% endif %}
+
+## Findings
+
+{% if not findings -%}
+*(no findings in this period)*
+{% else -%}
+{% for severity, group in findings_by_severity.items() if group -%}
+
+### {{ severity | capitalize }} ({{ group | length }})
+
+{% for v in group -%}
+#### {{ v.finding.title }}
+
+- **Target:** `{{ v.target.name }}`
+- **Tool:** {{ v.finding.source_tool }}
+- **Priority:** {{ "%.3f" | format(v.finding.priority) }}
+  ({{ "%.2f" | format(v.finding.severity_weight) }} × {{ "%.2f" | format(v.finding.confidence_weight) }} × {{ "%.2f" | format(v.target.target_weight) }} × {{ "%.2f" | format(v.finding.probability_real) }})
+- **Confidence:** {{ v.finding.confidence }}
+- **Status:** {{ v.finding.status }}
+- **First seen:** {{ v.finding.first_seen | isodatetime }}
+- **Last seen:** {{ v.finding.last_seen | isodatetime }}
+{% if v.scans -%}
+- **Observed in scans:**
+{% for s in v.scans %}  - {{ s.label }} ({{ s.source_tool }})
+{% endfor -%}
+{% endif %}
+
+{% endfor -%}
+{% endfor -%}
+{% endif %}
+
+## Raw data
+
+Raw tool output is preserved under the CSAK artifacts store; this
+report cites scans by label and ID so an analyst can resolve any
+finding back to the bytes it came from.
