@@ -6,6 +6,7 @@ from csak import __version__
 from csak.cli.findings import findings as findings_group
 from csak.cli.ingest import ingest as ingest_cmd
 from csak.cli.org import org as org_group
+from csak.cli.report import report as report_group
 from csak.cli.scan import scan as scan_group
 from csak.cli.target import target as target_group
 
@@ -47,6 +48,7 @@ main.add_command(ingest_cmd)
 main.add_command(findings_group)
 main.add_command(target_group)
 main.add_command(scan_group)
+main.add_command(report_group)
 
 
 if __name__ == "__main__":
