@@ -7,7 +7,6 @@ and JSON, and verify the output layout + no-overwriting rule.
 from __future__ import annotations
 
 import json
-import time
 import zipfile
 from pathlib import Path
 
@@ -133,8 +132,8 @@ def test_mixed_tool_report_end_to_end(tmp_path: Path) -> None:
     assert "Port_Scan" in md_text or "Port scan" in md_text
 
     # 6. Second invocation writes fresh timestamped files; prior ones
-    # are preserved. No overwriting.
-    time.sleep(1.1)  # ensure second-granularity timestamp differs
+    # are preserved. No overwriting — millisecond precision in the
+    # timestamp prefix means back-to-back invocations don't collide.
     r2 = _cli(runner, db, artifacts, reports, [
         "report", "generate",
         "--org", "acmecorp",

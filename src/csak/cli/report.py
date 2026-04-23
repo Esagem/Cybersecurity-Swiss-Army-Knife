@@ -24,8 +24,11 @@ def _period_slug(label: str) -> str:
 
 def _timestamp_prefix(now: datetime | None = None) -> str:
     now = now or datetime.now(timezone.utc)
-    # ISO-8601 with filesystem-safe colon replacement (second granularity).
-    return now.strftime("%Y-%m-%dT%H-%M-%S")
+    # ISO-8601 with filesystem-safe colon replacement. Millisecond
+    # precision so back-to-back invocations in the same second don't
+    # collide — the spec's "no overwriting" rule has to hold even when
+    # an analyst pipes several `report generate` calls together.
+    return now.strftime("%Y-%m-%dT%H-%M-%S-") + f"{now.microsecond // 1000:03d}"
 
 
 @click.group()
