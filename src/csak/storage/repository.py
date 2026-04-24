@@ -400,6 +400,43 @@ def get_finding(conn: sqlite3.Connection, finding_id: str) -> Finding | None:
     return _row_to_finding(row) if row else None
 
 
+class AmbiguousPrefix(LookupError):
+    """Raised when a finding-ID prefix matches more than one row."""
+
+    def __init__(self, prefix: str, matches: list[str]) -> None:
+        super().__init__(
+            f"id prefix {prefix!r} is ambiguous; matches {len(matches)} findings "
+            f"(first few: {', '.join(matches[:5])})"
+        )
+        self.prefix = prefix
+        self.matches = matches
+
+
+def resolve_finding_id(conn: sqlite3.Connection, prefix: str) -> str:
+    """Return the full finding ID for an unambiguous prefix match.
+
+    Matches the git-commit convention: the analyst pastes the short id
+    from ``findings list`` and the CLI resolves it here. A full UUID is
+    accepted too — the LIKE '<36-chars>%' still returns exactly one row.
+
+    Raises:
+      LookupError   — no finding matches the prefix.
+      AmbiguousPrefix — more than one finding matches.
+    """
+    if not prefix:
+        raise LookupError("empty finding id prefix")
+    rows = conn.execute(
+        "SELECT id FROM findings WHERE id LIKE ? AND deleted_at IS NULL "
+        "ORDER BY id",
+        (prefix + "%",),
+    ).fetchall()
+    if not rows:
+        raise LookupError(f"no finding matches id prefix {prefix!r}")
+    if len(rows) > 1:
+        raise AmbiguousPrefix(prefix, [r["id"] for r in rows])
+    return rows[0]["id"]
+
+
 def get_finding_by_dedup(
     conn: sqlite3.Connection, *, org_id: str, source_tool: str, dedup_key: str
 ) -> Finding | None:

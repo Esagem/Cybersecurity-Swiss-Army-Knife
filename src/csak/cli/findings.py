@@ -1,10 +1,32 @@
 from __future__ import annotations
 
+import sqlite3
+
 import click
 
 from csak.ingest.scoring import compute_priority
 from csak.storage import repository as repo
 from csak.storage.db import connect
+
+
+# Short ID width used both in the `findings list` output and as the
+# suggested copy length. 8 hex chars = 4 billion combinations, which
+# is plenty for the scale of a single CSAK database.
+SHORT_ID_WIDTH = 8
+
+
+def _resolve(conn: sqlite3.Connection, finding_id: str) -> str:
+    """Resolve a user-supplied finding id or prefix to a full ID.
+
+    Converts repository errors into Click errors so the user sees a
+    clean message instead of a Python traceback.
+    """
+    try:
+        return repo.resolve_finding_id(conn, finding_id)
+    except repo.AmbiguousPrefix as e:
+        raise click.ClickException(str(e))
+    except LookupError as e:
+        raise click.ClickException(str(e))
 
 
 @click.group()
@@ -39,11 +61,16 @@ def list_cmd(ctx: click.Context, org: str, status: str | None, severity: str | N
         if not rows:
             click.echo("(no findings)")
             return
-        click.echo(f"{'PRIORITY':>8}  {'SEVERITY':<8}  {'TOOL':<10}  {'TARGET':<30}  TITLE")
+        click.echo(
+            f"{'ID':<{SHORT_ID_WIDTH}}  "
+            f"{'PRIORITY':>8}  {'SEVERITY':<8}  {'TOOL':<10}  "
+            f"{'TARGET':<30}  TITLE"
+        )
         for f in rows:
             target = repo.get_target(conn, f.target_id)
             target_name = target.name if target else "?"
             click.echo(
+                f"{f.id[:SHORT_ID_WIDTH]:<{SHORT_ID_WIDTH}}  "
                 f"{f.priority:>8.3f}  "
                 f"{(f.severity or '—'):<8}  "
                 f"{f.source_tool:<10}  "
@@ -58,10 +85,15 @@ def list_cmd(ctx: click.Context, org: str, status: str | None, severity: str | N
 @click.argument("finding_id")
 @click.pass_context
 def show(ctx: click.Context, finding_id: str) -> None:
-    """Show a single finding's details."""
+    """Show a single finding's details.
+
+    FINDING_ID may be a full UUID or an unambiguous id prefix (at least
+    the 8 characters shown by ``findings list``).
+    """
     conn = connect(ctx.obj["db_path"])
     try:
-        f = repo.get_finding(conn, finding_id)
+        full_id = _resolve(conn, finding_id)
+        f = repo.get_finding(conn, full_id)
         if f is None:
             raise click.ClickException(f"finding {finding_id} not found")
         target = repo.get_target(conn, f.target_id)
@@ -104,10 +136,15 @@ def update(
     status: str | None,
     tags: tuple[str, ...],
 ) -> None:
-    """Mutate a finding. Triggers a priority recompute."""
+    """Mutate a finding. Triggers a priority recompute.
+
+    FINDING_ID may be a full UUID or an unambiguous id prefix (at least
+    the 8 characters shown by ``findings list``).
+    """
     conn = connect(ctx.obj["db_path"])
     try:
-        f = repo.get_finding(conn, finding_id)
+        full_id = _resolve(conn, finding_id)
+        f = repo.get_finding(conn, full_id)
         if f is None:
             raise click.ClickException(f"finding {finding_id} not found")
 
