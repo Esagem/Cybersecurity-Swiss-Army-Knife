@@ -3,6 +3,8 @@ from __future__ import annotations
 import click
 
 from csak import __version__
+from csak.cli.collect import collect as collect_cmd
+from csak.cli.doctor import doctor as doctor_cmd
 from csak.cli.findings import findings as findings_group
 from csak.cli.ingest import ingest as ingest_cmd
 from csak.cli.org import org as org_group
@@ -45,6 +47,8 @@ def main(ctx: click.Context, db: str, artifacts_dir: str, reports_dir: str) -> N
 
 main.add_command(org_group)
 main.add_command(ingest_cmd)
+main.add_command(collect_cmd)
+main.add_command(doctor_cmd)
 main.add_command(findings_group)
 main.add_command(target_group)
 main.add_command(scan_group)
