@@ -29,8 +29,14 @@ from csak.cli.path_setup import (
     check_path_status,
     is_directory_persisted_on_user_path,
 )
+from csak.collect.plugins import default_plugin_dir, load_plugins
 from csak.collect.tool import Tool
 from csak.collect.tools import ALL_TOOLS
+from csak.collect.types import (
+    types_in_registry,
+    validate_registry,
+    validate_tool_accepts_produces,
+)
 
 
 @dataclass
@@ -377,11 +383,66 @@ def doctor(yes: bool, no_go: bool, no_path: bool, no_tools: bool) -> None:
     """
     click.echo("Checking csak environment...\n")
 
+    # Slice 3: import plugins before doing tool checks so plugin-loaded
+    # tools appear in the per-tool list and any plugin-introduced types
+    # participate in the registry validation below.
+    plugin_report = load_plugins()
+    plugin_warnings: list[str] = list(plugin_report.warnings)
+
     path_status = check_path_status()
     click.echo(_format_path_status_line(path_status))
     statuses: list[ToolStatus] = [check_tool(t) for t in ALL_TOOLS]
     for st in statuses:
         click.echo(_format_status_line(st))
+
+    # Slice 3: plugin and type-registry validation. Failures are
+    # blocking ("collect won't run reliably"); warnings are advisory.
+    plugin_dir = plugin_report.plugin_dir
+    click.echo("")
+    click.echo(f"Checking plugin tools ({plugin_dir})...")
+    plugin_tools = [t for t in ALL_TOOLS if t.origin == "plugin"]
+    if not plugin_dir.exists():
+        click.echo("  (plugin directory does not exist — no plugins loaded)")
+    elif not plugin_tools and not plugin_warnings:
+        click.echo("  (no plugins loaded)")
+    else:
+        for t in plugin_tools:
+            click.echo(f"  [ok]   {t.name:<12} loaded from {t.source_path}")
+        for w in plugin_warnings:
+            click.echo(f"  [warn] {w}")
+
+    click.echo("")
+    click.echo("Checking type registry...")
+    type_count = len(types_in_registry())
+    plugin_type_count = max(0, type_count - 7)
+    click.echo(
+        f"  [ok]   {type_count} registered types "
+        f"({type_count - plugin_type_count} built-in, {plugin_type_count} plugin)"
+    )
+    registry_errors: list[str] = list(validate_registry())
+    for tool in ALL_TOOLS:
+        registry_errors.extend(
+            validate_tool_accepts_produces(tool.name, tool.accepts, tool.produces)
+        )
+    for err in registry_errors:
+        click.echo(f"  [fail] {err}", err=True)
+
+    click.echo("")
+    click.echo("Checking recursion graph...")
+    orphan_warnings = _check_recursion_graph()
+    if orphan_warnings:
+        for w in orphan_warnings:
+            click.echo(f"  [warn] {w}")
+    else:
+        click.echo("  [ok]   no orphan tools")
+
+    if registry_errors:
+        click.echo("")
+        click.echo(
+            f"Type registry has {len(registry_errors)} error(s); collect will "
+            "refuse to run until they are fixed.",
+            err=True,
+        )
 
     path_actionable = (
         path_status.state == "needs_add"
@@ -395,6 +456,8 @@ def doctor(yes: bool, no_go: bool, no_path: bool, no_tools: bool) -> None:
     go_installer = _go_installer_command() if go_missing and not no_go else None
 
     if not path_actionable and not actionable_tools:
+        if registry_errors:
+            sys.exit(1)
         click.echo("\nAll tools present and compatible. CSAK collect is ready.")
         return
 
@@ -531,7 +594,7 @@ def doctor(yes: bool, no_go: bool, no_path: bool, no_tools: bool) -> None:
                     click.echo(f"  ⤳ skipped — add {go_bin} to PATH yourself "
                                "or csak collect won't find the tools.")
 
-    if all_succeeded and not go_unresolved:
+    if all_succeeded and not go_unresolved and not registry_errors:
         click.echo("\nAll selected actions completed. CSAK collect is ready.")
     else:
         sys.exit(1)
@@ -558,6 +621,31 @@ def _apply_tool_install(status: ToolStatus) -> bool:
         err=True,
     )
     return False
+
+
+def _check_recursion_graph() -> list[str]:
+    """Return advisory warnings for the recursion graph.
+
+    Currently surfaces orphan output types — types a tool produces
+    that no registered tool (including the tool itself, since same-
+    tool recursion against a different target is valid) accepts. Per
+    spec these are warnings, not errors: an analyst may have a tool
+    whose output they consume manually.
+    """
+    from csak.collect.types import matches as types_match
+
+    warnings: list[str] = []
+    for tool in ALL_TOOLS:
+        for produces_type in tool.produces:
+            consumed = any(
+                types_match(produces_type, other.accepts) for other in ALL_TOOLS
+            )
+            if not consumed:
+                warnings.append(
+                    f"tool {tool.name!r} produces {produces_type!r} which no "
+                    "registered tool accepts (orphan output type)"
+                )
+    return warnings
 
 
 def _format_path_status_line(status: PathStatus) -> str:

@@ -4,10 +4,16 @@ The shape of these tables mirrors the slice-1 data model exactly —
 Org → Target → Scan → Finding, plus an immutable Artifact layer and a
 FindingScanOccurrence junction that records every scan a finding has
 appeared in.
+
+Slice 3 adds three nullable columns to ``scans`` (``parent_scan_id``,
+``depth``, ``triggered_by_finding_id``) for recursion lineage. Existing
+slice 1/2 databases are migrated in place by ``MIGRATIONS`` below; the
+CREATE TABLE statement reflects the slice 3 shape so fresh installs
+get the new columns directly.
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Each statement is run in order on a fresh database.
 SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -61,17 +67,20 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS scans (
-        id                  TEXT PRIMARY KEY,
-        org_id              TEXT NOT NULL REFERENCES orgs(id),
-        source_tool         TEXT NOT NULL,
-        label               TEXT NOT NULL,
-        scan_started_at     TEXT NOT NULL,
-        scan_completed_at   TEXT NOT NULL,
-        timestamp_source    TEXT NOT NULL,
-        artifact_ids_json   TEXT NOT NULL DEFAULT '[]',
-        target_ids_json     TEXT NOT NULL DEFAULT '[]',
-        ingested_at         TEXT NOT NULL,
-        notes               TEXT NOT NULL DEFAULT ''
+        id                       TEXT PRIMARY KEY,
+        org_id                   TEXT NOT NULL REFERENCES orgs(id),
+        source_tool              TEXT NOT NULL,
+        label                    TEXT NOT NULL,
+        scan_started_at          TEXT NOT NULL,
+        scan_completed_at        TEXT NOT NULL,
+        timestamp_source         TEXT NOT NULL,
+        artifact_ids_json        TEXT NOT NULL DEFAULT '[]',
+        target_ids_json          TEXT NOT NULL DEFAULT '[]',
+        ingested_at              TEXT NOT NULL,
+        notes                    TEXT NOT NULL DEFAULT '',
+        parent_scan_id           TEXT REFERENCES scans(id),
+        depth                    INTEGER NOT NULL DEFAULT 0,
+        triggered_by_finding_id  TEXT REFERENCES findings(id)
     )
     """,
     """
@@ -115,3 +124,19 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
 )
+
+
+# In-place migrations from version N to N+1. Each entry's statements
+# run only once when an existing database is opened at the older
+# version. The connector applies them in ascending order until the
+# database matches ``SCHEMA_VERSION``.
+MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: (
+        # Slice 3: Scan lineage columns. CREATE TABLE IF NOT EXISTS won't
+        # add columns to an existing table; ALTER TABLE handles slice 1/2
+        # databases that pre-date these columns.
+        "ALTER TABLE scans ADD COLUMN parent_scan_id TEXT REFERENCES scans(id)",
+        "ALTER TABLE scans ADD COLUMN depth INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scans ADD COLUMN triggered_by_finding_id TEXT REFERENCES findings(id)",
+    ),
+}

@@ -73,6 +73,15 @@ class Scan:
     target_ids: list[str] = field(default_factory=list)
     ingested_at: datetime | None = None
     notes: str = ""
+    # Slice 3 lineage. ``parent_scan_id`` is set when this Scan was
+    # spawned by recursion from another Scan's output. ``depth`` is the
+    # recursion depth (0 = root pass, the slice 2 single-pass behavior).
+    # ``triggered_by_finding_id`` is set when a specific Finding's
+    # content (e.g. nuclei's matched-at URL) caused this Scan to spawn;
+    # the parent Scan is always set when this is set, but not vice versa.
+    parent_scan_id: str | None = None
+    depth: int = 0
+    triggered_by_finding_id: str | None = None
 
 
 @dataclass

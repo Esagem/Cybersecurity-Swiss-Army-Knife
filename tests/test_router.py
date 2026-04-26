@@ -17,10 +17,10 @@ from csak.collect.router import route
         ("subdomain", "quick", ["httpx"], ["subfinder", "nuclei"]),
         # Subdomain → skip subfinder.
         ("subdomain", "standard", ["httpx", "nuclei"], ["subfinder"]),
-        # IP → skip subfinder.
-        ("ip", "standard", ["httpx", "nuclei"], ["subfinder"]),
-        # CIDR → skip subfinder.
-        ("cidr", "standard", ["httpx", "nuclei"], ["subfinder"]),
+        # Bare host (slice 2's ``ip``) → skip subfinder.
+        ("host", "standard", ["httpx", "nuclei"], ["subfinder"]),
+        # network_block (slice 2's ``cidr``) → skip subfinder.
+        ("network_block", "standard", ["httpx", "nuclei"], ["subfinder"]),
         # URL → skip subfinder + httpx; nuclei alone.
         ("url", "standard", ["nuclei"], ["subfinder", "httpx"]),
         # URL + quick → nothing applies (subfinder/httpx skip url, nuclei skipped by mode).
@@ -45,7 +45,7 @@ def test_invalid_target_skips_everything() -> None:
 
 
 def test_skip_reasons_are_human_readable() -> None:
-    routed = route("ip", "standard")  # type: ignore[arg-type]
+    routed = route("host", "standard")  # type: ignore[arg-type]
     assert "subdomain" in routed.skipped["subfinder"].lower()
 
 

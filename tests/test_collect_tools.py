@@ -94,8 +94,12 @@ def test_subfinder_overrides_pass_through() -> None:
 def test_httpx_applies_to_everything_but_url() -> None:
     assert HTTPX.applies_to("domain") is True
     assert HTTPX.applies_to("subdomain") is True
-    assert HTTPX.applies_to("ip") is True
-    assert HTTPX.applies_to("cidr") is True
+    # Slice 3 renames: ``ip`` → ``host`` (a bare IP classifies as
+    # ``host``), ``cidr`` → ``network_block``. httpx still accepts
+    # both via its slice 3 ``accepts = ["host", "network_block"]``
+    # declaration so the slice 2 routing is preserved.
+    assert HTTPX.applies_to("host") is True
+    assert HTTPX.applies_to("network_block") is True
     assert HTTPX.applies_to("url") is False
 
 
@@ -210,7 +214,10 @@ def test_httpx_rate_limit_does_not_fire_on_error_spike_stats() -> None:
 
 
 def test_nuclei_applies_to_every_valid_type() -> None:
-    for t in ("domain", "subdomain", "ip", "cidr", "url"):
+    # Slice 3 type names — ``ip`` → ``host``, ``cidr`` →
+    # ``network_block``. Nuclei accepts host (widening covers domain
+    # and subdomain) plus url and network_block.
+    for t in ("domain", "subdomain", "host", "network_block", "url"):
         assert NUCLEI.applies_to(t) is True  # type: ignore[arg-type]
     assert NUCLEI.applies_to("invalid") is False  # type: ignore[arg-type]
 

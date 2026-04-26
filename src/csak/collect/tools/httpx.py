@@ -15,10 +15,19 @@ Progress signal format from ``-stats -si 5``::
 Rate-limit signal: there is no clean structured event. We watch for
 errors-count climbing fast (the heuristic per spec) plus stray ``429``
 or ``503`` strings if any leak through ``-silent``.
+
+Slice 3 recursion graph: httpx accepts ``host`` (widening picks up
+``domain`` and ``subdomain``) and ``network_block`` (so the slice 2
+behaviour where httpx expands a CIDR target survives) and produces
+``url``. URL-typed candidates from the recursion frontier skip httpx
+deliberately — they're already known endpoints; nuclei consumes them
+directly.
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 from csak.collect.tool import (
     Mode,
@@ -27,6 +36,7 @@ from csak.collect.tool import (
     TargetType,
     Tool,
 )
+from csak.collect.types import InvalidTargetError, TypedTarget, classify
 
 
 # Default port set passed to httpx. httpx itself probes only 80/443
@@ -136,10 +146,15 @@ class HttpxTool(Tool):
         "ports": "-ports",
     }
 
-    def applies_to(self, target_type: TargetType) -> bool:
-        # Per spec routing matrix: httpx applies to everything except
-        # url targets (we already know URLs are "interesting").
-        return target_type in ("domain", "subdomain", "ip", "cidr")
+    # Slice 3 recursion graph. ``host`` widens to ``domain`` and
+    # ``subdomain`` via the matcher; ``network_block`` is included so
+    # CIDR / ASN targets continue to flow through httpx (httpx itself
+    # handles CIDR expansion via ``-u <cidr>``). ``url`` is deliberately
+    # absent: a URL is already a known endpoint; the slice 2 router
+    # records "URL is already a known endpoint; httpx step skipped"
+    # for url-typed targets and slice 3 inherits this.
+    accepts = ["host", "network_block"]
+    produces = ["url"]
 
     def invocation(
         self,
@@ -200,6 +215,51 @@ class HttpxTool(Tool):
         and the count anyway double-counts inapplicable-template
         connection failures (false positive on small targets)."""
         return "429" in line or "503" in line
+
+    def extract_outputs(self, artifact_path, scan):
+        """Classify each responding host's URL from httpx's JSONL output.
+
+        We only emit candidates for rows where ``status_code`` is
+        present (i.e. the host actually responded). Status, tech, and
+        title travel as advisory metadata so a downstream tool that
+        cares can use them without changing its declared accepts.
+        """
+        out: list[TypedTarget] = []
+        if artifact_path is None:
+            return out
+        path = Path(artifact_path)
+        if not path.exists():
+            return out
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return out
+        for raw in text.splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not row.get("status_code"):
+                continue
+            url = row.get("url") or row.get("host")
+            if not url:
+                continue
+            try:
+                t = classify(str(url))
+            except InvalidTargetError:
+                continue
+            t.metadata["status"] = row.get("status_code")
+            tech = row.get("tech") or row.get("technologies") or []
+            if tech:
+                t.metadata["tech"] = list(tech) if isinstance(tech, (list, tuple)) else [tech]
+            title = row.get("title")
+            if title:
+                t.metadata["title"] = str(title)
+            out.append(t)
+        return out
 
 
 HTTPX = HttpxTool()

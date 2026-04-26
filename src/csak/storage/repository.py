@@ -298,8 +298,9 @@ def insert_scan(conn: sqlite3.Connection, scan: Scan) -> Scan:
         """
         INSERT INTO scans(id, org_id, source_tool, label,
                           scan_started_at, scan_completed_at, timestamp_source,
-                          artifact_ids_json, target_ids_json, ingested_at, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          artifact_ids_json, target_ids_json, ingested_at, notes,
+                          parent_scan_id, depth, triggered_by_finding_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan.id,
@@ -313,9 +314,36 @@ def insert_scan(conn: sqlite3.Connection, scan: Scan) -> Scan:
             json.dumps(scan.target_ids),
             _iso(scan.ingested_at),
             scan.notes,
+            scan.parent_scan_id,
+            scan.depth,
+            scan.triggered_by_finding_id,
         ),
     )
     return scan
+
+
+def update_scan_lineage(
+    conn: sqlite3.Connection,
+    scan_id: str,
+    *,
+    parent_scan_id: str | None,
+    depth: int,
+    triggered_by_finding_id: str | None,
+) -> None:
+    """Patch lineage columns on an existing Scan row.
+
+    Slice 1 ingest creates Scan rows without lineage; the recursion
+    runner stamps lineage onto rows produced by recursion-spawned
+    ingests immediately after ``ingest_path`` returns.
+    """
+    conn.execute(
+        """
+        UPDATE scans
+           SET parent_scan_id = ?, depth = ?, triggered_by_finding_id = ?
+         WHERE id = ?
+        """,
+        (parent_scan_id, depth, triggered_by_finding_id, scan_id),
+    )
 
 
 def update_scan_targets(conn: sqlite3.Connection, scan_id: str, target_ids: list[str]) -> None:
@@ -339,6 +367,7 @@ def list_scans(conn: sqlite3.Connection, org_id: str) -> list[Scan]:
 
 
 def _row_to_scan(row: sqlite3.Row) -> Scan:
+    keys = row.keys()
     return Scan(
         id=row["id"],
         org_id=row["org_id"],
@@ -351,6 +380,13 @@ def _row_to_scan(row: sqlite3.Row) -> Scan:
         target_ids=json.loads(row["target_ids_json"]),
         ingested_at=_parse_iso(row["ingested_at"]),
         notes=row["notes"],
+        parent_scan_id=row["parent_scan_id"] if "parent_scan_id" in keys else None,
+        depth=int(row["depth"]) if "depth" in keys and row["depth"] is not None else 0,
+        triggered_by_finding_id=(
+            row["triggered_by_finding_id"]
+            if "triggered_by_finding_id" in keys
+            else None
+        ),
     )
 
 

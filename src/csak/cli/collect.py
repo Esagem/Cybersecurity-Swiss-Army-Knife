@@ -18,10 +18,24 @@ from pathlib import Path
 
 import click
 
-from csak.collect.detect import detect_target_type
 from csak.collect.pipeline import CollectReport, run_collect
+from csak.collect.recursion import (
+    DepthSummary,
+    FrontierTask,
+    RecursionProgress,
+    RecursionReport,
+    run_collect_recursive,
+)
+from csak.collect.plugins import load_plugins
 from csak.collect.runner import RunEvent
 from csak.collect.tool import VALID_MODES
+from csak.collect.tools import ALL_TOOLS
+from csak.collect.types import (
+    InvalidTargetError,
+    classify,
+    validate_registry,
+    validate_tool_accepts_produces,
+)
 from csak.storage import repository as repo
 from csak.storage.db import connect
 
@@ -66,6 +80,25 @@ _OVERRIDE_FLAGS: list[tuple[str, str, str, str]] = [
 @click.option("--verbose/--no-verbose", default=False, help="Stream raw tool stderr.")
 @click.option("--quiet/--no-quiet", default=False, help="Suppress live progress.")
 @click.option("--yes", is_flag=True, default=False, help="Skip interactive prompts.")
+@click.option(
+    "--recurse",
+    is_flag=True,
+    default=False,
+    help="Enable recursive collect: harvest typed outputs and feed downstream tools.",
+)
+@click.option(
+    "--max-depth",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Recursion depth ceiling. 0 = infinite, 1 = no recursion. Ignored without --recurse.",
+)
+@click.option(
+    "--no-plugins",
+    is_flag=True,
+    default=False,
+    help="Skip loading plugins from ~/.csak/tools/.",
+)
 # Build the per-tool override flags dynamically.
 @click.option("--subfinder-rate-limit", default=None, help=_OVERRIDE_FLAGS[0][3])
 @click.option("--httpx-rate-limit", default=None, help=_OVERRIDE_FLAGS[1][3])
@@ -89,6 +122,9 @@ def collect(
     verbose: bool,
     quiet: bool,
     yes: bool,
+    recurse: bool,
+    max_depth: int,
+    no_plugins: bool,
     subfinder_rate_limit: str | None,
     httpx_rate_limit: str | None,
     httpx_threads: str | None,
@@ -100,11 +136,36 @@ def collect(
     nuclei_concurrency: str | None,
 ) -> None:
     """Run the collect pipeline against TARGET."""
-    target_type = detect_target_type(target)
-    if target_type == "invalid":
-        raise click.ClickException(
-            f"target {target!r} is not a valid domain, subdomain, IP, CIDR, or URL"
+    if not no_plugins:
+        plugin_load = load_plugins()
+        for warning in plugin_load.warnings:
+            click.echo(f"[csak] plugin warning: {warning}", err=True)
+
+    # Slice 3: validate the type registry + tool accepts/produces
+    # references before any tool runs. Per spec §Type registry
+    # validation, failures stop the run with the offending plugin
+    # named.
+    registry_errors = list(validate_registry())
+    for tool in ALL_TOOLS:
+        registry_errors.extend(
+            validate_tool_accepts_produces(tool.name, tool.accepts, tool.produces)
         )
+    if registry_errors:
+        for err in registry_errors:
+            click.echo(f"[csak] registry error: {err}", err=True)
+        raise click.ClickException(
+            "type registry has errors; fix the offending plugin(s) and re-run "
+            "(see `csak doctor`)"
+        )
+
+    try:
+        typed = classify(target)
+    except InvalidTargetError:
+        raise click.ClickException(
+            f"target {target!r} is not a valid domain, subdomain, host, "
+            f"network_block, URL, or service identifier"
+        )
+    target_type = typed.type
 
     overrides = _collect_overrides(
         subfinder_rate_limit=subfinder_rate_limit,
@@ -131,25 +192,52 @@ def collect(
             raise click.ClickException(f"unknown org slug: {org!r}")
 
         reporter = ProgressReporter(verbose=verbose, quiet=quiet)
-        reporter.print_header(target=target, target_type=target_type, mode=mode)
+        reporter.print_header(
+            target=target,
+            target_type=target_type,
+            mode=mode,
+            recurse=recurse,
+            max_depth=max_depth,
+        )
 
         wall_start = time.monotonic()
-        report = run_collect(
-            conn,
-            org_id=org_row.id,
-            target=target,
-            mode=mode,  # type: ignore[arg-type]
-            artifacts_root=Path(ctx.obj["artifacts_dir"]),
-            overrides=overrides,
-            timeouts=timeouts,
-            progress_callback=reporter.handle_event,
-            adaptive_rate=adaptive_rate,
-        )
-        wall_elapsed = time.monotonic() - wall_start
+        if recurse:
+            recursion_progress = ReporterRecursionProgress(reporter, yes=yes)
+            recursion_report = run_collect_recursive(
+                conn,
+                org_id=org_row.id,
+                target=target,
+                mode=mode,  # type: ignore[arg-type]
+                artifacts_root=Path(ctx.obj["artifacts_dir"]),
+                overrides=overrides,
+                timeouts=timeouts,
+                progress_callback=reporter.handle_event,
+                adaptive_rate=adaptive_rate,
+                max_depth=max_depth,
+                progress=recursion_progress,
+            )
+            wall_elapsed = time.monotonic() - wall_start
+            reporter.print_recursion_summary(
+                report=recursion_report, wall_elapsed=wall_elapsed
+            )
+            hard_failure = recursion_report.hard_failure
+        else:
+            report = run_collect(
+                conn,
+                org_id=org_row.id,
+                target=target,
+                mode=mode,  # type: ignore[arg-type]
+                artifacts_root=Path(ctx.obj["artifacts_dir"]),
+                overrides=overrides,
+                timeouts=timeouts,
+                progress_callback=reporter.handle_event,
+                adaptive_rate=adaptive_rate,
+            )
+            wall_elapsed = time.monotonic() - wall_start
+            reporter.print_summary(report=report, wall_elapsed=wall_elapsed)
+            hard_failure = report.hard_failure
 
-        reporter.print_summary(report=report, wall_elapsed=wall_elapsed)
-
-        if report.hard_failure:
+        if hard_failure:
             sys.exit(2)
     finally:
         conn.close()
@@ -230,11 +318,87 @@ class ProgressReporter:
 
     # ── header / summary ────────────────────────────────────────────
 
-    def print_header(self, *, target: str, target_type: str, mode: str) -> None:
+    def print_header(
+        self,
+        *,
+        target: str,
+        target_type: str,
+        mode: str,
+        recurse: bool = False,
+        max_depth: int | None = None,
+    ) -> None:
         if self.quiet:
             return
         click.echo(f"[csak] Identified target {target} as type={target_type}")
         click.echo(f"[csak] Mode: {mode}")
+        if recurse:
+            depth_label = "infinite" if max_depth == 0 else str(max_depth)
+            click.echo(
+                f"[csak] Recursion: enabled, max-depth={depth_label}, dedup=on"
+            )
+
+    # ── slice 3: depth-aware hooks ─────────────────────────────────
+
+    def print_depth_header(self, *, depth: int, queued: int, max_depth: int) -> None:
+        if self.quiet:
+            return
+        self._finalise_bar()
+        if depth == 0:
+            label = f"Depth 0 (root) - {queued} candidate"
+        else:
+            remaining = (
+                "infinite"
+                if max_depth == 0
+                else f"{max(0, max_depth - depth)}"
+            )
+            label = f"Depth {depth} (depth budget remaining: {remaining}) - {queued} queued"
+        click.echo(f"[csak] {label}")
+
+    def print_depth_summary(self, summary) -> None:
+        if self.quiet:
+            return
+        self._finalise_bar()
+        click.echo(
+            f"[csak] Depth {summary.depth} complete. "
+            f"Frontier: {summary.extracted} typed targets extracted, "
+            f"{summary.queued} queued for depth {summary.depth + 1} "
+            f"({summary.deduped} deduped/dropped)"
+        )
+
+    def print_recursion_summary(
+        self, *, report, wall_elapsed: float
+    ) -> None:
+        click.echo("")
+        base = report.base
+        click.echo(
+            f"[csak] Collect complete for {base.target} (mode={base.mode}, "
+            f"recurse=on, depths={report.depths_run})"
+        )
+        click.echo(f"[csak] Total elapsed: {wall_elapsed:.1f}s")
+        # Per-depth task counts.
+        per_tool: dict[str, int] = {}
+        for s in report.stages:
+            if s.status not in ("succeeded", "failed", "timeout"):
+                continue
+            per_tool[s.tool] = per_tool.get(s.tool, 0) + 1
+        if per_tool:
+            click.echo(
+                "[csak] Scans created: "
+                + ", ".join(f"{name} x{count}" for name, count in per_tool.items())
+            )
+        click.echo(
+            f"[csak] Findings: {sum(s.new_findings for s in report.stages)} new, "
+            f"{sum(s.reoccurrences for s in report.stages)} re-occurrences"
+        )
+        if report.frontier_remaining:
+            click.echo(
+                f"[csak] Frontier remaining: {len(report.frontier_remaining)} "
+                f"unscanned candidates"
+                + (" (user declined to continue)" if report.user_declined else "")
+            )
+        click.echo(
+            f"[csak] Run `csak findings list --org {_org_slug_hint(base)}` to review"
+        )
 
     # ── event handler ──────────────────────────────────────────────
 
@@ -423,3 +587,46 @@ class ProgressReporter:
 def _org_slug_hint(report: CollectReport) -> str:
     """We don't have the slug in the report — render a placeholder."""
     return "<org>"
+
+
+class ReporterRecursionProgress(RecursionProgress):
+    """Bridge ``RecursionProgress`` callbacks into the ProgressReporter.
+
+    Renders depth headers, frontier summaries, and the prompt-to-continue
+    via ``click.confirm``. Honours the slice 2 ``--yes`` flag so
+    non-interactive usage extends the depth budget without prompting.
+    """
+
+    def __init__(self, reporter: "ProgressReporter", *, yes: bool) -> None:
+        self._reporter = reporter
+        self._yes = yes
+
+    def on_depth_started(self, depth: int, queued: int, max_depth: int) -> None:
+        self._reporter.print_depth_header(
+            depth=depth, queued=queued, max_depth=max_depth
+        )
+
+    def on_depth_completed(self, summary: DepthSummary) -> None:
+        self._reporter.print_depth_summary(summary)
+
+    def confirm_continue(
+        self, depth: int, max_depth: int, queued: int
+    ) -> bool:
+        # Spec: ``--yes`` bypasses the prompt and extends the depth
+        # budget by another ``max_depth``. Default response is Y when
+        # the analyst hits Enter.
+        self._reporter._finalise_bar()
+        click.echo(
+            f"[csak] Depth budget hit (max-depth={max_depth}). "
+            f"Frontier remaining: {queued} unscanned candidates."
+        )
+        if self._yes:
+            click.echo(f"[csak] --yes set; continuing for another {max_depth} depths.")
+            return True
+        try:
+            return click.confirm(
+                f"[csak] Continue with another {max_depth} depths?",
+                default=True,
+            )
+        except (click.exceptions.Abort, EOFError):
+            return False

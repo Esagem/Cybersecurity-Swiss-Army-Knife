@@ -12,11 +12,19 @@ so we watch for repeated ``[WRN] context deadline exceeded`` /
 
 ``quick`` mode skips Nuclei entirely per spec §Modes — that's
 expressed via ``is_skipped_by_mode``, not by an empty invocation.
+
+Slice 3 recursion graph: nuclei accepts ``host`` (widening picks up
+``domain``/``subdomain``), ``url`` (URLs flow directly to nuclei without
+a httpx hop), and ``network_block`` (slice 2 parity). It produces
+``url`` (from a finding's ``matched-at``/``extracted-results``) and
+``finding_ref`` (forward-compat for tools that take findings as input;
+slice 3 has none, but the type is registered).
 """
 from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from csak.collect.tool import (
     Mode,
@@ -25,6 +33,7 @@ from csak.collect.tool import (
     TargetType,
     Tool,
 )
+from csak.collect.types import InvalidTargetError, TypedTarget, classify
 
 
 INVOCATIONS: dict[Mode, list[str] | None] = {
@@ -170,9 +179,12 @@ class NucleiTool(Tool):
         "concurrency": "-c",
     }
 
-    def applies_to(self, target_type: TargetType) -> bool:
-        # Nuclei applies to every valid target type.
-        return target_type in ("domain", "subdomain", "ip", "cidr", "url")
+    # Slice 3 recursion graph. Nuclei takes hosts (widening covers
+    # domain and subdomain), URLs (URL-typed candidates skip httpx
+    # and feed nuclei directly), and CIDRs (slice 2 parity — nuclei
+    # itself iterates the network when given ``-u <cidr>``).
+    accepts = ["host", "url", "network_block"]
+    produces = ["url", "finding_ref"]
 
     def is_skipped_by_mode(self, mode: Mode) -> bool:
         # Per spec §Modes — quick mode skips nuclei entirely.
@@ -230,6 +242,49 @@ class NucleiTool(Tool):
             return False
         lowered = line.lower()
         return any(pat in lowered for pat in _RL_PATTERNS)
+
+    def extract_outputs(self, artifact_path, scan):
+        """Harvest typed values from nuclei's JSONL findings file.
+
+        Two sources per finding:
+          * ``matched-at`` — the URL or host the template fired on.
+          * ``extracted-results`` — strings extracted by the template
+            (often URLs or hostnames).
+
+        We classify each via the registry and silently drop strings
+        that aren't typed values (free-form template output, response
+        bodies, etc).
+        """
+        out: list[TypedTarget] = []
+        if artifact_path is None:
+            return out
+        path = Path(artifact_path)
+        if not path.exists():
+            return out
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return out
+        for raw in text.splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                finding = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            matched = finding.get("matched-at") or finding.get("host")
+            if matched:
+                try:
+                    out.append(classify(str(matched)))
+                except InvalidTargetError:
+                    pass
+            for value in finding.get("extracted-results") or []:
+                try:
+                    out.append(classify(str(value)))
+                except InvalidTargetError:
+                    continue
+        return out
 
 
 NUCLEI = NucleiTool()

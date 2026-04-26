@@ -23,6 +23,7 @@ from csak.cli.org import org as org_group
 from csak.cli.report import report as report_group
 from csak.cli.scan import scan as scan_group
 from csak.cli.target import target as target_group
+from csak.cli.tools import tools as tools_group
 
 
 @click.group()
@@ -65,6 +66,7 @@ main.add_command(findings_group)
 main.add_command(target_group)
 main.add_command(scan_group)
 main.add_command(report_group)
+main.add_command(tools_group)
 
 
 if __name__ == "__main__":

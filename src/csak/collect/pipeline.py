@@ -1,9 +1,9 @@
 """Collect orchestrator — wire detect → route → run → ingest.
 
-One ``run_collect`` call drives the whole collect pipeline for a
-single ``csak collect`` invocation:
+One ``run_collect`` call drives one depth-0 cascade:
 
-  * Resolves the target type via ``detect.detect_target_type``.
+  * Resolves the target type via ``classify`` (the runtime registry
+    seam introduced in slice 3 — the slice 2 ``detect.py`` is gone).
   * Resolves the running tool set via ``router.route``.
   * Records a ``status=skipped`` Scan for each tool that didn't apply.
   * For each running tool: invokes the runner, on success feeds the
@@ -12,14 +12,26 @@ single ``csak collect`` invocation:
   * Decides whether the next stage can still run when its upstream
     failed — per spec: subfinder failure → httpx still tries with the
     bare target; httpx failure → nuclei aborts.
+  * Inter-stage chaining uses each tool's ``extract_outputs`` to
+    classify outputs and the type-aware matcher to decide what feeds
+    the next stage. The slice 2 ``_prepare_input_for_next_stage`` /
+    ``_extract_field_to_list`` helpers are gone — their job is now
+    done by per-tool ``extract_outputs`` plus a single dispatcher
+    here.
 
 The pipeline never *raises* on stage failure — failures are recorded
-and surfaced via the returned ``CollectReport``. The caller (CLI)
-chooses the exit code based on the report.
+and surfaced via the returned ``CollectReport``. The caller (CLI or
+recursion runner) chooses the exit code based on the report.
+
+Slice 3: ``run_collect`` accepts optional ``depth`` /
+``parent_scan_id`` / ``triggered_by_finding_id`` / ``dedup_set``
+parameters. The non-recursive caller (slice 2 single-pass) leaves
+them at their defaults and gets bit-for-bit slice 2 behavior. The
+recursion runner (``csak.collect.recursion``) passes lineage and a
+shared dedup set so frontier targets aren't re-queued across depths.
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 import tempfile
 from dataclasses import dataclass, field
@@ -27,7 +39,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from csak.collect.detect import detect_target_type
 from csak.collect.router import Routed, route
 from csak.collect.runner import (
     RunEvent,
@@ -36,6 +47,13 @@ from csak.collect.runner import (
     make_input_file_for,
 )
 from csak.collect.tool import Mode, TargetType, Tool
+from csak.collect.tools import ALL_TOOLS  # noqa: F401  (importing triggers tool registration)
+from csak.collect.types import (
+    InvalidTargetError,
+    TypedTarget,
+    classify,
+    matches,
+)
 from csak.ingest.pipeline import IngestReport, ingest_path
 from csak.storage import repository as repo
 from csak.storage.models import Scan
@@ -60,6 +78,10 @@ class StageOutcome:
     reoccurrences: int = 0
     notes: str = ""
     error: str | None = None
+    # Slice 3: typed values harvested from this stage's artifact, used
+    # by the recursion runner to build the next-depth frontier.
+    extracted: list[TypedTarget] = field(default_factory=list)
+    depth: int = 0
 
 
 @dataclass
@@ -115,27 +137,31 @@ def run_collect(
     runner: Runner | None = None,
     progress_callback: ProgressCallback | None = None,
     adaptive_rate: bool = True,
+    depth: int = 0,
+    parent_scan_id: str | None = None,
+    triggered_by_finding_id: str | None = None,
+    dedup_set: set[tuple[str, str, Mode]] | None = None,
 ) -> CollectReport:
-    """Top-level collect entrypoint.
+    """Top-level collect entrypoint for a single depth-N cascade.
 
-    ``overrides``: mapping of tool name → dict of override key → value
-    (e.g. ``{"nuclei": {"templates": "/path"}}``).
-
-    ``timeouts``: mapping of tool name → timeout seconds.
-
-    ``work_dir`` is where each stage's output file is written before
-    being copied into the artifact store. Created under ``tempfile``
-    if not given.
+    For slice 2 callers (no ``--recurse``): ``depth=0``,
+    ``parent_scan_id=None``, ``dedup_set=None`` → bit-for-bit slice 2
+    behavior. The slice 3 recursion runner threads its dedup set and
+    lineage through this same function for the depth-0 root pass and
+    then drives subsequent depths via single-tool calls (see
+    ``csak.collect.recursion``).
     """
     overrides = overrides or {}
     timeouts = timeouts or {}
     started_at = datetime.now(timezone.utc)
-    target_type = detect_target_type(target)
 
-    if target_type == "invalid":
+    try:
+        typed = classify(target)
+        target_type: TargetType = typed.type
+    except InvalidTargetError:
         return CollectReport(
             target=target,
-            target_type=target_type,
+            target_type="invalid",
             mode=mode,
             started_at=started_at,
             completed_at=started_at,
@@ -146,22 +172,20 @@ def run_collect(
     routed: Routed = route(target_type, mode)
 
     # Synthesize Scan rows for each skipped tool. Spec §Pipeline shape
-    # says these have `status=skipped` and zero findings.
+    # says these have ``status=skipped`` and zero findings.
+    label = _label(target, mode, started_at)
     for tool_name, reason in routed.skipped.items():
-        scan_id = _record_skipped_scan(
+        _record_skipped_scan(
             conn,
             org_id=org_id,
             tool_name=tool_name,
             reason=reason,
-            label=_label(target, mode, started_at),
+            label=label,
             now=started_at,
+            depth=depth,
+            parent_scan_id=parent_scan_id,
+            triggered_by_finding_id=triggered_by_finding_id,
         )
-        # Don't surface skipped tools as full StageOutcomes — they go
-        # in the ``skipped`` dict so the CLI can render them
-        # separately. But we DO record them in the stages list so
-        # ``csak scan list`` and reports see them.
-
-    label = _label(target, mode, started_at)
 
     runner = runner or Runner(
         progress_callback=progress_callback,
@@ -182,16 +206,48 @@ def run_collect(
         skipped=dict(routed.skipped),
     )
 
+    # The ``upstream_typed`` carries this stage's extracted candidates
+    # forward; the next stage filters by its ``accepts`` and writes a
+    # list-file for ``-l`` consumption. Empty at depth 0 root: each
+    # tool either gets the prior stage's typed outputs or falls back
+    # to the bare target.
+    upstream_typed: list[TypedTarget] = []
     upstream_input: Path | None = None
 
     for tool in routed.tools:
+        # Pre-flight: is this (tool, target, mode) already in the
+        # within-invocation dedup set? At depth 0 the dedup set is
+        # typically empty so this is a no-op for non-recursive calls.
+        if dedup_set is not None:
+            key = (tool.name, target, mode)
+            if key in dedup_set:
+                outcome = StageOutcome(
+                    tool=tool.name,
+                    status="skipped",
+                    notes=f"dedup: ({tool.name}, {target}, {mode}) already run",
+                    depth=depth,
+                )
+                report.stages.append(outcome)
+                continue
+            dedup_set.add(key)
+
+        # Build the input file for this stage from upstream typed
+        # values it accepts. Falls back to None (the tool runs against
+        # the bare target via ``-u``) when nothing upstream applies.
+        stage_input = _input_for_stage(
+            tool=tool,
+            upstream=upstream_typed,
+            existing_path=upstream_input,
+            work_dir=work_dir,
+        )
+
         stage_dir = work_dir / tool.name
         result = runner.run_tool(
             tool=tool,
             target=target,
             target_type=target_type,
             mode=mode,
-            input_path=upstream_input,
+            input_path=stage_input,
             output_dir=stage_dir,
             overrides=overrides.get(tool.name),
             timeout=timeouts.get(tool.name),
@@ -206,30 +262,34 @@ def run_collect(
             mode=mode,
             now=datetime.now(timezone.utc),
             artifacts_root=artifacts_root,
+            depth=depth,
+            parent_scan_id=parent_scan_id,
+            triggered_by_finding_id=triggered_by_finding_id,
         )
         report.stages.append(outcome)
 
         # Decide whether to feed downstream.
-        if result.status == "succeeded" and result.output_line_count > 0:
-            upstream_input = _prepare_input_for_next_stage(
-                tool=tool,
-                output_path=result.output_path,
-                work_dir=work_dir,
-            )
-        elif result.status == "succeeded" and result.output_line_count == 0:
-            # Zero output: subfinder's contract is "fall back to the
-            # bare target" (spec §Pipeline shape). httpx zero output
-            # → nothing for nuclei (handled below). For now keep
-            # whatever upstream we had; if upstream is None the next
-            # stage will fall back to the raw target via -u.
-            pass
+        if result.status == "succeeded" and result.output_path is not None:
+            outcome.extracted = _safe_extract_outputs(tool, result.output_path, outcome)
+            if outcome.extracted:
+                upstream_typed = outcome.extracted
+                upstream_input = None  # ``_input_for_stage`` will rebuild as needed
+            else:
+                # Zero typed output: subfinder's contract is "fall back
+                # to the bare target" (spec §Pipeline shape). httpx
+                # zero output → nothing for nuclei (handled below).
+                upstream_typed = []
+                upstream_input = None
         elif tool.name == "subfinder":
             # Subfinder failure → keep upstream None so httpx falls
             # back to the bare target (spec §Pipeline shape).
+            upstream_typed = []
             upstream_input = None
         elif tool.name == "httpx":
             # httpx failure → nuclei has no live host list. Spec
-            # says: pipeline aborts.
+            # says: pipeline aborts (depth 0 only — at depth 1+ each
+            # task is independent and runs through the recursion
+            # driver, not this loop).
             _abort_remaining(
                 conn,
                 org_id=org_id,
@@ -238,11 +298,64 @@ def run_collect(
                 label=label,
                 reason="upstream httpx failed; no live hosts to scan",
                 now=datetime.now(timezone.utc),
+                depth=depth,
+                parent_scan_id=parent_scan_id,
+                triggered_by_finding_id=triggered_by_finding_id,
             )
             break
 
     report.completed_at = datetime.now(timezone.utc)
     return report
+
+
+def _safe_extract_outputs(
+    tool: Tool, output_path: Path, outcome: StageOutcome
+) -> list[TypedTarget]:
+    """Wrap ``tool.extract_outputs`` so a buggy plugin doesn't kill the run."""
+    scan = None  # repository lookup is overkill here — the artifact path is
+                  # what extract_outputs actually needs; ``scan`` is advisory.
+    try:
+        return list(tool.extract_outputs(output_path, scan))
+    except Exception as exc:  # pragma: no cover - defensive
+        outcome.notes = (
+            outcome.notes + ("; " if outcome.notes else "")
+            + f"extract_outputs failed: {exc}"
+        )
+        return []
+
+
+def _input_for_stage(
+    *,
+    tool: Tool,
+    upstream: list[TypedTarget],
+    existing_path: Path | None,
+    work_dir: Path,
+) -> Path | None:
+    """Build the ``-l`` input file for this stage from upstream candidates.
+
+    Filters ``upstream`` to candidates whose type widens to one of the
+    tool's ``accepts``. Writes a deduped, newline-separated value list
+    to a per-tool path under ``work_dir``. Returns ``None`` when there
+    is nothing to write — the runner falls back to ``-u <target>``.
+    """
+    if not upstream:
+        return existing_path
+    accepted = [t for t in upstream if matches(t.type, tool.accepts)]
+    if not accepted:
+        return existing_path
+    seen: set[str] = set()
+    lines: list[str] = []
+    for t in accepted:
+        if t.value in seen:
+            continue
+        seen.add(t.value)
+        lines.append(t.value)
+    if not lines:
+        return existing_path
+    dest = work_dir / f"{tool.name}-input.txt"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return dest
 
 
 def _materialize_outcome(
@@ -255,6 +368,9 @@ def _materialize_outcome(
     mode: Mode,
     now: datetime,
     artifacts_root: Path,
+    depth: int,
+    parent_scan_id: str | None,
+    triggered_by_finding_id: str | None,
 ) -> StageOutcome:
     """Turn a RunResult into either an ingest-driven Scan + Findings
     or a synthesized failed-stage Scan.
@@ -281,6 +397,7 @@ def _materialize_outcome(
                 elapsed=result.elapsed,
                 error=f"ingest failed: {e}",
                 notes=f"via csak collect mode={mode}; ingest error: {e}",
+                depth=depth,
                 scan_id=_record_failed_scan(
                     conn,
                     org_id=org_id,
@@ -288,6 +405,9 @@ def _materialize_outcome(
                     reason=f"ingest failed: {e}",
                     label=label,
                     now=now,
+                    depth=depth,
+                    parent_scan_id=parent_scan_id,
+                    triggered_by_finding_id=triggered_by_finding_id,
                 ),
             )
 
@@ -295,11 +415,23 @@ def _materialize_outcome(
         # ``Scan.notes`` carries "via csak collect" so reports can
         # cite the methodology correctly.
         notes = f"via csak collect mode={mode}"
+        if depth > 0:
+            notes += f"; depth={depth}"
         if result.output_line_count == 0:
             notes += "; zero rows produced"
         if result.adjusted_rate is not None:
             notes += f"; rate adjusted to {result.adjusted_rate} req/s"
         _set_scan_notes(conn, ingest_report.scan_id, notes)
+        # Slice 3: stamp lineage onto the Scan row created by ingest.
+        if depth > 0 or parent_scan_id is not None or triggered_by_finding_id is not None:
+            repo.update_scan_lineage(
+                conn,
+                ingest_report.scan_id,
+                parent_scan_id=parent_scan_id,
+                depth=depth,
+                triggered_by_finding_id=triggered_by_finding_id,
+            )
+            conn.commit()
 
         return StageOutcome(
             tool=tool.name,
@@ -312,11 +444,14 @@ def _materialize_outcome(
             new_findings=ingest_report.new_findings,
             reoccurrences=ingest_report.reoccurrences,
             notes=notes,
+            depth=depth,
         )
 
     # Failed or timeout — record a Scan row with the reason in notes.
     reason = result.error or f"{tool.name} {result.status}"
     notes = f"via csak collect mode={mode}; status={result.status}: {reason}"
+    if depth > 0:
+        notes += f"; depth={depth}"
     scan_id = _record_failed_scan(
         conn,
         org_id=org_id,
@@ -324,6 +459,9 @@ def _materialize_outcome(
         reason=notes,
         label=label,
         now=now,
+        depth=depth,
+        parent_scan_id=parent_scan_id,
+        triggered_by_finding_id=triggered_by_finding_id,
     )
     return StageOutcome(
         tool=tool.name,
@@ -334,80 +472,8 @@ def _materialize_outcome(
         elapsed=result.elapsed,
         notes=notes,
         error=result.error,
+        depth=depth,
     )
-
-
-def _prepare_input_for_next_stage(
-    *, tool: Tool, output_path: Path | None, work_dir: Path
-) -> Path | None:
-    """Convert this stage's tool output into a plain host/URL list the
-    next stage can consume.
-
-    Subfinder JSONL → host list (one host per line).
-    httpx JSONL → URL list (one URL per line).
-    Nuclei is the last stage so its output never feeds downstream.
-    """
-    if output_path is None or not output_path.exists():
-        return None
-    if tool.name == "subfinder":
-        return _extract_field_to_list(
-            output_path,
-            field="host",
-            dest=work_dir / "subfinder-hosts.txt",
-        )
-    if tool.name == "httpx":
-        return _extract_field_to_list(
-            output_path,
-            field="url",
-            dest=work_dir / "httpx-urls.txt",
-            fallback="host",
-        )
-    return None
-
-
-def _extract_field_to_list(
-    path: Path,
-    *,
-    field: str,
-    dest: Path,
-    fallback: str | None = None,
-) -> Path | None:
-    """Read a JSONL file, extract one field per row, write a newline-
-    separated list. Returns the dest path if any rows were extracted,
-    None if the result would be empty (caller falls back to bare
-    target).
-    """
-    out_lines: list[str] = []
-    seen: set[str] = set()
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for raw in text.splitlines():
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            row = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        value = row.get(field)
-        if not value and fallback:
-            value = row.get(fallback)
-        if not value:
-            continue
-        s = str(value)
-        if s in seen:
-            continue
-        seen.add(s)
-        out_lines.append(s)
-
-    if not out_lines:
-        return None
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
-    return dest
 
 
 def _record_skipped_scan(
@@ -418,6 +484,9 @@ def _record_skipped_scan(
     reason: str,
     label: str,
     now: datetime,
+    depth: int = 0,
+    parent_scan_id: str | None = None,
+    triggered_by_finding_id: str | None = None,
 ) -> str:
     notes = f"skipped: {reason}"
     scan = Scan(
@@ -432,6 +501,9 @@ def _record_skipped_scan(
         target_ids=[],
         ingested_at=now,
         notes=notes,
+        parent_scan_id=parent_scan_id,
+        depth=depth,
+        triggered_by_finding_id=triggered_by_finding_id,
     )
     repo.insert_scan(conn, scan)
     conn.commit()
@@ -446,6 +518,9 @@ def _record_failed_scan(
     reason: str,
     label: str,
     now: datetime,
+    depth: int = 0,
+    parent_scan_id: str | None = None,
+    triggered_by_finding_id: str | None = None,
 ) -> str:
     scan = Scan(
         id=repo.new_id(),
@@ -459,6 +534,9 @@ def _record_failed_scan(
         target_ids=[],
         ingested_at=now,
         notes=reason,
+        parent_scan_id=parent_scan_id,
+        depth=depth,
+        triggered_by_finding_id=triggered_by_finding_id,
     )
     repo.insert_scan(conn, scan)
     conn.commit()
@@ -474,6 +552,9 @@ def _abort_remaining(
     label: str,
     reason: str,
     now: datetime,
+    depth: int,
+    parent_scan_id: str | None,
+    triggered_by_finding_id: str | None,
 ) -> None:
     """Record skipped Scans for the tools we never got to."""
     for tool in remaining:
@@ -484,6 +565,9 @@ def _abort_remaining(
             reason=reason,
             label=label,
             now=now,
+            depth=depth,
+            parent_scan_id=parent_scan_id,
+            triggered_by_finding_id=triggered_by_finding_id,
         )
         report.stages.append(
             StageOutcome(
@@ -491,6 +575,7 @@ def _abort_remaining(
                 status="skipped",
                 scan_id=scan_id,
                 notes=f"skipped: {reason}",
+                depth=depth,
             )
         )
         report.skipped[tool.name] = reason
