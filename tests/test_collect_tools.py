@@ -7,6 +7,8 @@ integration tests.
 """
 from __future__ import annotations
 
+import pytest
+
 from csak.collect.tools.httpx import HTTPX
 from csak.collect.tools.nuclei import NUCLEI
 from csak.collect.tools.subfinder import SUBFINDER
@@ -122,6 +124,42 @@ def test_httpx_uses_u_when_no_input_file() -> None:
     assert argv[argv.index("-u") + 1] == "10.0.0.1"
 
 
+def test_httpx_includes_default_port_set_per_mode() -> None:
+    """Bare-host targets should probe more than 80/443 — common dev,
+    admin, and HTTP-alt ports must be in the default set."""
+    from csak.collect.tools.httpx import DEFAULT_PORTS
+
+    for mode in ("quick", "standard", "deep"):
+        argv = HTTPX.invocation(
+            target="10.0.0.1",
+            target_type="ip",
+            mode=mode,  # type: ignore[arg-type]
+            input_file=None,
+            output_file="/tmp/out.jsonl",
+        )
+        assert "-ports" in argv
+        ports = argv[argv.index("-ports") + 1]
+        assert ports == DEFAULT_PORTS[mode]
+        # Sanity: every mode covers the most common HTTP(S) + 8080/8443.
+        for p in ("80", "443", "8080", "8443"):
+            assert p in ports.split(","), f"port {p} missing from {mode} default"
+
+
+def test_httpx_user_supplied_ports_override_replaces_default() -> None:
+    """Passing --httpx-ports should replace the mode default, not duplicate -ports."""
+    argv = HTTPX.invocation(
+        target="10.0.0.1",
+        target_type="ip",
+        mode="standard",
+        input_file=None,
+        output_file="/tmp/out.jsonl",
+        overrides={"ports": "9999"},
+    )
+    # -ports appears exactly once and carries the user-supplied value.
+    assert argv.count("-ports") == 1
+    assert argv[argv.index("-ports") + 1] == "9999"
+
+
 def test_httpx_parse_progress_extracts_stats() -> None:
     line = "[INF] Stats: 234/500 (46%) | RPS: 45 | Errors: 12 | Duration: 5s"
     p = HTTPX.parse_progress(line)
@@ -137,19 +175,33 @@ def test_httpx_parse_progress_returns_none_for_unrelated_lines() -> None:
     assert HTTPX.parse_progress("[WRN] some random message") is None
 
 
+def test_httpx_parse_progress_handles_current_v1_6_format() -> None:
+    """Current httpx (v1.6+) emits stats in a new shape with no
+    ``Stats:`` token and no ``Errors:`` field. Verified by capturing
+    ``httpx -silent -stats -si 1`` against a multi-host input."""
+    line = "[0:00:05] | RPS: 12 | Requests: 87 | Hosts: 34/50 (68%)"
+    p = HTTPX.parse_progress(line)
+    assert p is not None
+    assert p.count == 34
+    assert p.total == 50
+    assert p.percent == 68
+    assert p.rps == 12
+    assert p.errors == 0  # new format has no errors counter
+
+
 def test_httpx_rate_limit_detected_for_429_or_503() -> None:
     HTTPX._last_errors = 0
     assert HTTPX.detect_rate_limit_signal("[INF] http response: 429") is True
     assert HTTPX.detect_rate_limit_signal("[INF] http response: 503") is True
 
 
-def test_httpx_rate_limit_detects_error_spike() -> None:
+def test_httpx_rate_limit_does_not_fire_on_error_spike_stats() -> None:
+    """The error-spike heuristic was removed — it generated false
+    positives on small targets where most templates probe non-existent
+    services. Only explicit 429/503 should trigger."""
     HTTPX._last_errors = 5
     line = "[INF] Stats: 100/200 (50%) | RPS: 30 | Errors: 50 | Duration: 5s"
-    assert HTTPX.detect_rate_limit_signal(line) is True
-    # Subsequent quiet stats line should not re-trigger.
-    quiet = "[INF] Stats: 150/200 (75%) | RPS: 30 | Errors: 51 | Duration: 10s"
-    assert HTTPX.detect_rate_limit_signal(quiet) is False
+    assert HTTPX.detect_rate_limit_signal(line) is False
 
 
 # ---------------------------------------------------------------------------
@@ -164,14 +216,18 @@ def test_nuclei_applies_to_every_valid_type() -> None:
 
 
 def test_nuclei_skipped_in_quick_mode() -> None:
+    """Per spec §Modes — quick mode skips nuclei entirely. Quick is
+    'tell me what's there' reconnaissance (subfinder + httpx surface
+    discovery), not 'find vulnerabilities' — that's standard's job."""
     assert NUCLEI.is_skipped_by_mode("quick") is True
     assert NUCLEI.is_skipped_by_mode("standard") is False
     assert NUCLEI.is_skipped_by_mode("deep") is False
 
 
 def test_nuclei_quick_mode_invocation_raises() -> None:
-    import pytest
-
+    """Calling .invocation(mode='quick') should fail — quick should
+    never reach the runner because the router filters nuclei out via
+    is_skipped_by_mode. If it does, that's a routing bug worth catching."""
     with pytest.raises(ValueError):
         NUCLEI.invocation(
             target="acme.com",
@@ -183,6 +239,11 @@ def test_nuclei_quick_mode_invocation_raises() -> None:
 
 
 def test_nuclei_invocation_severity_per_mode() -> None:
+    """Standard now includes ``info`` so real-world risks tagged ``info``
+    by nuclei (EOL software, missing security headers, generic env-file
+    disclosure) reach csak's triage layer instead of being silently
+    dropped at the scanner. Discovered via the integration harness
+    baseline against the heavy target."""
     standard = NUCLEI.invocation(
         target="acme.com",
         target_type="domain",
@@ -190,8 +251,7 @@ def test_nuclei_invocation_severity_per_mode() -> None:
         input_file="/tmp/in",
         output_file="/tmp/out",
     )
-    assert "low,medium,high,critical" in standard
-    assert "info,low,medium,high,critical" not in standard
+    assert "info,low,medium,high,critical" in standard
 
     deep = NUCLEI.invocation(
         target="acme.com",
@@ -218,30 +278,55 @@ def test_nuclei_template_override() -> None:
 
 
 def test_nuclei_rate_limit_signal_from_warnings() -> None:
-    assert (
-        NUCLEI.detect_rate_limit_signal(
-            "[WRN] [cve-test] Could not execute request for: context deadline exceeded"
-        )
-        is True
-    )
-    assert (
-        NUCLEI.detect_rate_limit_signal(
-            "[WRN] [cve-test] connection refused"
-        )
-        is True
-    )
-    # Unrelated warning does not trigger.
-    assert (
-        NUCLEI.detect_rate_limit_signal("[WRN] unrelated warning") is False
-    )
+    """Per spec §Adaptive rate limiting — only explicit rate-limit
+    indicators (429/503/rate-limit/too-many-requests/retry-after)
+    in [WRN]/[ERR] lines count as signals."""
+    assert NUCLEI.detect_rate_limit_signal(
+        "[WRN] [cve-test] got HTTP 429 Too Many Requests from target"
+    ) is True
+    assert NUCLEI.detect_rate_limit_signal(
+        "[WRN] [tpl] response: 503 Service Unavailable"
+    ) is True
+    assert NUCLEI.detect_rate_limit_signal(
+        "[WRN] [tpl] rate limit exceeded; backing off"
+    ) is True
+    assert NUCLEI.detect_rate_limit_signal(
+        "[ERR] retry-after: 30s from upstream"
+    ) is True
 
 
-def test_nuclei_rate_limit_signal_from_stats_spike() -> None:
+def test_nuclei_generic_network_failures_are_not_rate_limit_signals() -> None:
+    """Connection refused / context deadline exceeded fire on closed
+    ports against small targets — not rate limiting. Treating them as
+    rate-limit signals causes false-positive throttling that slows
+    every scan against a host that doesn't run every probed service."""
+    assert NUCLEI.detect_rate_limit_signal(
+        "[WRN] [cve-test] Could not execute request for: context deadline exceeded"
+    ) is False
+    assert NUCLEI.detect_rate_limit_signal(
+        "[WRN] [cve-test] connection refused"
+    ) is False
+    assert NUCLEI.detect_rate_limit_signal(
+        "[WRN] [cve-test] connection reset by peer"
+    ) is False
+    # Unrelated warning still doesn't trigger.
+    assert NUCLEI.detect_rate_limit_signal("[WRN] unrelated warning") is False
+
+
+def test_nuclei_rate_limit_does_not_fire_on_stats_error_spike() -> None:
+    """Removed heuristic regression test: a rising errors counter in
+    stats lines (legacy or JSON) must NOT trigger rate halving on its
+    own. nuclei against a small target inflates error counts whenever
+    templates probe services the host doesn't run — that's not rate
+    limiting, just inapplicable templates. Only the [WRN]/[ERR]
+    pattern matchers and 429/503 (per spec) should signal."""
     NUCLEI._last_errors = 0
-    line = "[INF] Stats: requests=500, errors=30, RPS=40, percent=20"
-    assert NUCLEI.detect_rate_limit_signal(line) is True
-    follow = "[INF] Stats: requests=600, errors=31, RPS=40, percent=25"
-    assert NUCLEI.detect_rate_limit_signal(follow) is False
+    legacy = "[INF] Stats: requests=500, errors=30, RPS=40, percent=20"
+    assert NUCLEI.detect_rate_limit_signal(legacy) is False
+
+    json_line = '{"requests":"500","errors":"30","percent":"20","rps":"40"}'
+    NUCLEI._last_errors = 0
+    assert NUCLEI.detect_rate_limit_signal(json_line) is False
 
 
 def test_nuclei_progress_parsing() -> None:
@@ -252,3 +337,29 @@ def test_nuclei_progress_parsing() -> None:
     assert p.errors == 23
     assert p.rps == 45
     assert p.percent == 15
+
+
+def test_nuclei_progress_parsing_handles_v3_json_format() -> None:
+    """nuclei v3+ emits stats as JSON to stderr instead of the old
+    ``Stats: requests=… errors=… …`` key=value format. Verified by
+    capturing real nuclei v3.8 output. Without this parser the live
+    progress bar stays stuck at 'starting…' for the entire run."""
+    line = (
+        '{"duration":"0:00:05","errors":"49","hosts":"1","matched":"0",'
+        '"percent":"3","requests":"532","rps":"101",'
+        '"templates":"6537","total":"14894",'
+        '"startedAt":"2026-04-25T16:42:19.0919857-05:00"}'
+    )
+    p = NUCLEI.parse_progress(line)
+    assert p is not None
+    assert p.count == 532
+    assert p.total == 14894
+    assert p.percent == 3
+    assert p.rps == 101
+    assert p.errors == 49
+
+
+def test_nuclei_progress_parsing_skips_non_stats_json() -> None:
+    """Some other JSON line (e.g. a finding) must not trick the parser."""
+    finding = '{"template":"some-template","host":"127.0.0.1","matched-at":"http://x"}'
+    assert NUCLEI.parse_progress(finding) is None

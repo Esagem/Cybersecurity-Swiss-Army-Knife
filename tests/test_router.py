@@ -12,7 +12,7 @@ from csak.collect.router import route
         ("domain", "standard", ["subfinder", "httpx", "nuclei"], []),
         # Domain in deep mode runs everything.
         ("domain", "deep", ["subfinder", "httpx", "nuclei"], []),
-        # Quick mode skips nuclei everywhere.
+        # Quick mode skips nuclei everywhere per spec §Modes.
         ("domain", "quick", ["subfinder", "httpx"], ["nuclei"]),
         ("subdomain", "quick", ["httpx"], ["subfinder", "nuclei"]),
         # Subdomain → skip subfinder.
@@ -23,7 +23,7 @@ from csak.collect.router import route
         ("cidr", "standard", ["httpx", "nuclei"], ["subfinder"]),
         # URL → skip subfinder + httpx; nuclei alone.
         ("url", "standard", ["nuclei"], ["subfinder", "httpx"]),
-        # URL + quick → nothing applies.
+        # URL + quick → nothing applies (subfinder/httpx skip url, nuclei skipped by mode).
         ("url", "quick", [], ["subfinder", "httpx", "nuclei"]),
     ],
 )
@@ -50,5 +50,8 @@ def test_skip_reasons_are_human_readable() -> None:
 
 
 def test_quick_mode_reason_mentions_mode() -> None:
+    """Per spec §Modes — quick mode skips nuclei entirely, and the
+    reason surfaces in the routing report so analysts can see *why*
+    it was skipped (not just that it was)."""
     routed = route("domain", "quick")  # type: ignore[arg-type]
     assert "quick" in routed.skipped["nuclei"]

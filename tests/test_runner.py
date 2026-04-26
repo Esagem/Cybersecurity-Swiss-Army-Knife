@@ -174,10 +174,10 @@ def test_runner_adaptive_rate_kicks_in_on_repeated_signals(tmp_path: Path) -> No
     """Three rate-limit signals within the window halve the rate."""
     output = tmp_path / "nuclei" / "findings.jsonl"
     stderr = [
-        "[WRN] [cve-x] Could not execute request for: context deadline exceeded",
-        "[WRN] [cve-y] Could not execute request for: context deadline exceeded",
-        "[WRN] [cve-z] Could not execute request for: context deadline exceeded",
-        "[WRN] [cve-q] connection refused",
+        "[WRN] [cve-x] HTTP 429 Too Many Requests from target",
+        "[WRN] [cve-y] HTTP 429 Too Many Requests from target",
+        "[WRN] [cve-z] HTTP 429 Too Many Requests from target",
+        "[WRN] [cve-q] response: 503 Service Unavailable",
     ]
     spawner = FakeSpawner(
         lambda argv: FakeProcess(
@@ -215,9 +215,9 @@ def test_runner_adaptive_rate_disabled_does_not_emit_adjustment(
     spawner = FakeSpawner(
         lambda argv: FakeProcess(
             stderr_lines=[
-                "[WRN] [a] context deadline exceeded",
-                "[WRN] [b] context deadline exceeded",
-                "[WRN] [c] context deadline exceeded",
+                "[WRN] [a] HTTP 429 Too Many Requests",
+                "[WRN] [b] HTTP 429 Too Many Requests",
+                "[WRN] [c] HTTP 429 Too Many Requests",
             ],
             exit_code=0,
             write_output=(tmp_path / "nuclei" / "findings.jsonl", ""),

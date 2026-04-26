@@ -242,6 +242,7 @@ def test_pipeline_url_only_runs_nuclei(
 def test_pipeline_quick_mode_skips_nuclei(
     db, tmp_path: Path, artifacts_dir: Path
 ) -> None:
+    """Per spec §Modes — quick mode skips nuclei entirely."""
     org = repo.create_org(db, name="acme", slug="acme")
     fake = FakeRunner(
         {

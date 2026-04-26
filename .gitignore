@@ -24,3 +24,6 @@ reports/
 .vscode/
 .idea/
 *.swp
+
+# Claude Code per-machine state and worktrees
+.claude/

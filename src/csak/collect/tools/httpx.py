@@ -29,6 +29,24 @@ from csak.collect.tool import (
 )
 
 
+# Default port set passed to httpx. httpx itself probes only 80/443
+# unless a port list is given; that misses dev servers, internal admin
+# UIs, and most enterprise web apps. We expand to the high-signal
+# OWASP-recommended port set per mode:
+#
+#   quick    — 5 most common HTTP(S) ports
+#   standard — adds the next tier of common dev/admin/proxy ports
+#   deep     — full coverage of common alternate-port HTTP services
+#
+# Source: ProjectDiscovery's "common ports" reference + OWASP testing
+# guide §4.2.1.
+DEFAULT_PORTS: dict[Mode, str] = {
+    "quick":    "80,443,8080,8443,8000",
+    "standard": "80,443,8080,8443,8000,8008,8081,8088,8888,3000,5000,9000,9090",
+    "deep":     "80,443,8080,8443,8000,8001,8008,8009,8081,8082,8088,8089,8090,8443,8888,9000,9001,9080,9090,9091,9443,3000,3001,4000,5000,5080,5601,6000,7000,7001,7070,7080,8118,9200,9300",
+}
+
+
 INVOCATIONS: dict[Mode, list[str]] = {
     "quick": [
         # source: reconFTW v4.0 modules/web.sh (lightweight probe recipe)
@@ -49,16 +67,52 @@ INVOCATIONS: dict[Mode, list[str]] = {
 }
 
 
-# Compiled once at import. The format is documented in the wiki — the
-# only stable parts are the ``Stats:`` token, ``N/M``, ``(P%)``,
-# ``RPS: N``, and ``Errors: N``.
-_STATS_RE = re.compile(
+# Two stats line formats observed in current httpx (v1.6+):
+#
+#   [0:00:01] | RPS: 20 | Requests: 26 | Hosts: 12/12 (100%)
+#
+# Older builds also emit a ``Stats:`` legacy form. We accept both.
+# ``Hosts: N/M (P%)`` doubles as count/total/percent — there is no
+# separate ``Errors:`` field in the new format, so we default errors
+# to 0 (the rate-limiter falls back to its [WRN] / [ERR] heuristic).
+_STATS_RE_NEW = re.compile(
+    r"\[\d+:\d+:\d+\]"
+    r".*?RPS:\s*(?P<rps>\d+)"
+    r".*?Requests:\s*(?P<requests>\d+)"
+    r".*?Hosts:\s*(?P<count>\d+)\s*/\s*(?P<total>\d+)\s*\((?P<pct>\d+)%\)",
+    re.IGNORECASE,
+)
+_STATS_RE_LEGACY = re.compile(
     r"Stats:\s*(?P<count>\d+)\s*/\s*(?P<total>\d+)"
     r".*?\((?P<pct>\d+)%\)"
     r".*?RPS:\s*(?P<rps>\d+)"
     r".*?Errors:\s*(?P<errors>\d+)",
     re.IGNORECASE,
 )
+
+
+def _parse_stats(line: str) -> dict[str, int | None] | None:
+    """Return ``{count, total, percent, rps, errors}`` if ``line`` is
+    an httpx stats line, else ``None``."""
+    match = _STATS_RE_NEW.search(line)
+    if match:
+        return {
+            "count": int(match.group("count")),
+            "total": int(match.group("total")),
+            "percent": int(match.group("pct")),
+            "rps": int(match.group("rps")),
+            "errors": 0,
+        }
+    match = _STATS_RE_LEGACY.search(line)
+    if match:
+        return {
+            "count": int(match.group("count")),
+            "total": int(match.group("total")),
+            "percent": int(match.group("pct")),
+            "rps": int(match.group("rps")),
+            "errors": int(match.group("errors")),
+        }
+    return None
 
 
 class HttpxTool(Tool):
@@ -79,6 +133,7 @@ class HttpxTool(Tool):
         "rate_limit": "-rl",
         "threads": "-t",
         "timeout": "-timeout",
+        "ports": "-ports",
     }
 
     def applies_to(self, target_type: TargetType) -> bool:
@@ -107,12 +162,19 @@ class HttpxTool(Tool):
             argv.extend(["-u", target])
         argv.extend(["-o", output_file])
 
+        # Apply mode's default port set, unless the caller is going to
+        # override via ``--httpx-ports``. Adding it here (rather than
+        # in the static INVOCATIONS recipe) keeps overrides idempotent.
+        overrides = overrides or {}
+        if "ports" not in overrides:
+            argv.extend(["-ports", DEFAULT_PORTS[mode]])
+
         # Track previous stage's error count so we can detect rapid
         # rises. Stored on the instance for the duration of one run;
         # the pipeline resets it before each invocation.
         self._last_errors = 0
 
-        for key, value in (overrides or {}).items():
+        for key, value in overrides.items():
             flag = self.override_flags.get(key)
             if flag is None:
                 continue
@@ -120,34 +182,24 @@ class HttpxTool(Tool):
         return argv
 
     def parse_progress(self, line: str) -> ProgressUpdate | None:
-        match = _STATS_RE.search(line)
-        if match is None:
+        stats = _parse_stats(line)
+        if stats is None:
             return None
         return ProgressUpdate(
-            count=int(match.group("count")),
-            total=int(match.group("total")),
-            percent=int(match.group("pct")),
-            rps=int(match.group("rps")),
-            errors=int(match.group("errors")),
-            message=None,
+            count=stats["count"],
+            total=stats["total"],
+            percent=stats["percent"],
+            rps=stats["rps"],
+            errors=stats["errors"],
         )
 
     def detect_rate_limit_signal(self, line: str) -> bool:
-        # Strong signals: literal 429 or 503 in any line (rare under
-        # -silent but happens in newer versions).
-        if "429" in line or "503" in line:
-            return True
-        # Heuristic: the errors-count in -stats jumped sharply.
-        match = _STATS_RE.search(line)
-        if match is None:
-            return False
-        errors = int(match.group("errors"))
-        last = getattr(self, "_last_errors", 0)
-        rose = errors - last
-        self._last_errors = errors
-        # Threshold per spec wiki: errors rising by ~10+ between
-        # 5-second intervals is the canonical heuristic.
-        return rose >= 10
+        """Per spec §Adaptive rate limiting — only the explicit
+        rate-limit responses count. The stats-error heuristic was
+        removed because httpx's new stats line has no errors counter
+        and the count anyway double-counts inapplicable-template
+        connection failures (false positive on small targets)."""
+        return "429" in line or "503" in line
 
 
 HTTPX = HttpxTool()

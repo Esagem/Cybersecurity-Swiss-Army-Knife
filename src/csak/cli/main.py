@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import sys
+
 import click
 
 from csak import __version__
+
+# When stdout/stderr aren't a tty (CI, pipes, file redirects), Windows
+# Python defaults to cp1252, which can't encode the glyphs we print
+# (✓ ✗ ⚠). Force UTF-8 with replacement so we never crash on output.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):  # pragma: no cover — defensive
+            pass
 from csak.cli.collect import collect as collect_cmd
 from csak.cli.doctor import doctor as doctor_cmd
 from csak.cli.findings import findings as findings_group

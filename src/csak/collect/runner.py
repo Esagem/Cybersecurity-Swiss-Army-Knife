@@ -114,6 +114,7 @@ class RealSpawner:
     ) -> RunningProcess:
         proc = subprocess.Popen(
             argv,
+            stdin=subprocess.DEVNULL,    # nuclei exits 1 if stdin is the inherited console on Windows
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
